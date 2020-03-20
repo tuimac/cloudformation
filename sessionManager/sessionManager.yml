@@ -1,10 +1,71 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Create environment for session manager
 
+Parameters:
+  VPCCidr:
+    Type: String
+    Default: 10.1.0.0/16
 
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.1.0.0/26
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.1.0.64/26
+
+  EndpointSubnetCidr:
+    Type: String
+    Default: 10.1.0.128/26
 
 Resources:
-  
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPCCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: sessionManager
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: sessionManager
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCidr
+      AvailabilityZone: ap-northeast-1a
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: private
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: ap-northeast-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public
 
 
   EC2Endpoint:
