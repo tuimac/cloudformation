@@ -1,6 +1,6 @@
-# Send Magic Packet
+# Cloudformation templates
 
-Under Developing
+Just the place I upload cloudformation templates for specific situation.
 
 ## Getting Started
 

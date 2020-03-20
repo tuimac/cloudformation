@@ -33,7 +33,7 @@ function main(){
     checkArg $1
 	checkEnv
 	checkGitSetting
-	#readComment
+	readComment
 
 	[[ ! -e .git ]] && git init
     #git remote rm origin
