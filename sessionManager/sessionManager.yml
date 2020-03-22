@@ -389,7 +389,7 @@ Outputs:
       Name: SSMEC2RoleProfileArn
 
   SSMEC2RoleArn:
-    Value: !GetAtt SSMEC2Role.Arn
+    Value: !GetAtt EC2IAMRole.Arn
     Export:
       Name: SSMEC2RoleArn
 
