@@ -185,8 +185,8 @@ Resources:
           CidrIp: !Ref PrivateSubnetCidr
           Description: for private subnet
         - IpProtocol: tcp
-          FromPort: 433
-          ToPort: 433
+          FromPort: 443
+          ToPort: 443
           DestinationPrefixListId: pl-61a54008
           Description: To S3 bucket through Endpoint
       Tags:
@@ -215,13 +215,13 @@ Resources:
           CidrIp: !Ref PublicSubnetCidr
           Description: for public subnet
         - IpProtocol: tcp
-          FromPort: 433
-          ToPort: 433
+          FromPort: 443
+          ToPort: 443
           DestinationPrefixListId: pl-61a54008
           Description: To S3 bucket through Endpoint
         - IpProtocol: tcp
-          FromPort: 433
-          ToPort: 433
+          FromPort: 443
+          ToPort: 443
           CidrIp: 0.0.0.0/0
           Description: Allow access to the Internet by HTTPS
         - IpProtocol: tcp
@@ -387,6 +387,11 @@ Outputs:
     Value: !GetAtt SSMEC2RoleProfile.Arn
     Export:
       Name: SSMEC2RoleProfileArn
+
+  SSMEC2RoleArn:
+    Value: !GetAtt EC2IAMRole.Arn
+    Export:
+      Name: SSMEC2RoleArn
 
   SSMSpotFleetRoleArn:
     Value: !GetAtt SSMSpotFleetRole.Arn
