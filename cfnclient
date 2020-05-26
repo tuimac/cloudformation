@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+
+# Just import modules for this script.
+import boto3
+import traceback
+import logging
+import sys
+import re
+import time
+import datetime
+import json
+import argparse
+import signal
+from multiprocessing import Process
+from os import walk, path, devnull, getppid, kill
+from contextlib import redirect_stdout
+
+from botocore.exceptions import ClientError
+
+################################################################
+#################### How to Use this script ####################
+#
+# Change "CONFIG" dictionary variable contents like below
+# example.
+#
+# (Example)
+#
+# CONFIG = {
+#     "clustername(don't change)": "name of cluster of root stacks"
+#     "bucketname(don't change)": "bucket name",
+#     "bucketregion(don't change)": "bucket region"
+#     "templates(don't change)": {
+#         "first stackname": "template file name by relative path",
+#         "second stackname": "template file name by relative path"
+#     }
+#     "uploadTarget(don't change)": "root directory of template files"
+# }
+#
+# If you want to create multiple stacks at once execution,
+# you add "stackname(key)" and "template file name(value)" to
+# template's value.
+#
+#################################################################
+
+CONFIG = {
+    "clustername": "poc",
+    "bucketname": "00-cfn-repository",
+    "bucketregion": "ap-northeast-1",
+    "templates": {
+        "poc-environment": "createPocEnv.yaml",
+    },
+    "uploadTarget": "poc",
+}
+
+######################################
+# Don't need to modify below scripts.#
+######################################
+
+class CfnAutomation:
+    def __init__(self):
+        self.s3resource = boto3.resource("s3")
+        self.s3client = boto3.client("s3")
+        self.cfnclient = boto3.client("cloudformation")
+        self.ssmclient = boto3.client("ssm")
+        logging.basicConfig(level=logging.INFO)
+
+    # Called from "createStacks" function.
+    def __uploadTemplates(self):
+        try:
+            # Confirm directory was passed by argument is exist or not.
+            directory = path.expanduser(CONFIG["uploadTarget"])
+            if path.exists(directory) is False: raise FileNotFoundError
+
+            # Delete all files in the bucket.
+            if self.s3client.list_objects_v2(Bucket=CONFIG["bucketname"])["KeyCount"] > 0:
+                for content in self.s3client.list_objects_v2(Bucket=CONFIG["bucketname"])["Contents"]:
+                    response = self.s3client.delete_object(
+                        Bucket = CONFIG["bucketname"],
+                        Key = content["Key"]
+                    )
+            print("Delete all objects in " + CONFIG["bucketname"] + " bucket has been success.")
+
+            # Search all files under target directory and upload each files.
+            for current, dirs, files in walk(directory):
+                if len(dirs) == 0 or len(files) > 0:
+                    for file in files:
+                        if file == sys.argv[0]: continue
+                        allpath = current + "/" + file
+                        m = re.match(directory + "/", allpath)
+                        key = allpath[:m.start()] + allpath[m.end():]
+                        self.s3resource.meta.client.upload_file(allpath, CONFIG["bucketname"], key)
+            print("Upload all template files to " + CONFIG["bucketname"] + " bucket has been success.")
+        except Exception as e:
+            raise e
+        return
+    
+    # Called from "createStacks" function.
+    def __doCreateStacks(self, add=False):
+        def searchStatusReason(stackName):
+            events = self.cfnclient.describe_stack_events(StackName=stackName)
+            logicalResourceId = ""
+            for event in events["StackEvents"]:
+                if event["ResourceStatus"] == "CREATE_FAILED":
+                    logicalResourceId = event["LogicalResourceId"]
+                    logging.error(logicalResourceId + ": " + event["ResourceStatusReason"])
+            return logicalResourceId
+        try:
+            # You can't create same name of stacks if before you create same name of stacks.
+            # So before you create stacks, search them and delete them.
+            # This is synchronous process.
+            if add is False:
+                self.deleteStacks()
+            
+            # Create stacks and check creating stacks status.
+            for stackName, template in CONFIG["templates"].items():
+                if add is True:
+                    if stackName in self.cfnclient.list_stacks(StackStatusFilter=["CREATE_COMPLETE"]):
+                        continue
+                # Create stacks.
+                templateUrl = "https://" + CONFIG["bucketname"] + ".s3." + CONFIG["bucketregion"] + ".amazonaws.com/" + template
+                try:
+                    response = self.cfnclient.create_stack(
+                        StackName = stackName,
+                        TemplateURL = templateUrl,
+                        Capabilities = ["CAPABILITY_NAMED_IAM"]
+                    )
+                except ClientError as e:
+                    if e.response["Error"]["Code"] == "ValidationError":
+                        logging.error("Maybe 'templates' filename in CONFIG is wrong...Check it out!!")
+                        continue
+                    else:
+                        raise e
+                        break
+                except:
+                    raise e
+                    break
+                
+                # Check to create stacks status.
+                startTime = datetime.datetime.now()
+                createdStacksSet = set()
+                creatingStacksSet = set()
+                while True:
+                    try:
+                        failedStacks = self.cfnclient.list_stacks(
+                            StackStatusFilter = [
+                                "CREATE_FAILED", "ROLLBACK_IN_PROGRESS", "DELETE_IN_PROGRESS"
+                            ]
+                        )["StackSummaries"]
+                        createdStacks = self.cfnclient.list_stacks(
+                            StackStatusFilter = ["CREATE_COMPLETE"]
+                        )["StackSummaries"]
+                        creatingStacks = self.cfnclient.list_stacks(
+                            StackStatusFilter = ["CREATE_IN_PROGRESS"]
+                        )["StackSummaries"]
+                        if len(failedStacks) != 0:
+                            endTime = str(datetime.datetime.now() - startTime)
+                            logging.error(stackname + ": CREATE_FAILED")
+                            logicalResourceId = searchStatusReason(stackName)
+                            if logicalResourceId != stackName:
+                                eventFlag = False
+                                for stack in self.cfnclient.list_stacks(StackStatusFilter=["DELETE_IN_PROGRESS"])["StackSummaries"]:
+                                    stackname = stack["StackName"]
+                                    if logicalResourceId in stackname:
+                                        searchStatusReason(stack["StackId"])
+                                        logging.error(stackName + ": CREATE_FAILED: [TIME] "  + endTime)
+                                        eventFlag = True
+                                        break
+                                if eventFlag is True: break
+                                for stack in self.cfnclient.list_stacks(StackStatusFilter=["DELETE_COMPLETE"])["StackSummaries"]:
+                                    stackname = stack["StackName"]
+                                    if logicalResourceId in stackname:
+                                        searchStatusReason(stack["StackId"])
+                                        logging.error(stackName + ": CREATE_FAILED: [TIME] "  + endTime)
+                                        eventFlag = True
+                                        break
+                                if eventFlag is True: break
+                                logging.error(stackName + ": CREATE_FAILED: [TIME] "  + endTime)
+                                break
+                            else:
+                                logging.error(stackName + ": CREATE_FAILED: [TIME] "  + endTime)
+                                break
+                        if len(creatingStacks) <= 0:
+                            if "CREATE_COMPLETE" == self.cfnclient.describe_stacks(StackName=stackName)["Stacks"][0]["StackStatus"]:
+                                endTime = str(datetime.datetime.now() - startTime)
+                                logging.info(stackName + ": CREATE_COMPLETE: [TIME] "  + endTime)
+                                break
+                            else:
+                                pass
+                        for createdStack in createdStacks:
+                            stackname = createdStack["StackName"]
+                            if not stackname in createdStacksSet and stackName in stackname:
+                                logging.info(stackname + ": CREATE_COMPLETE")
+                                createdStacksSet.add(stackname)
+                        for creatingStack in creatingStacks:
+                            stackname = creatingStack["StackName"]
+                            if not stackname in creatingStacksSet and stackName in stackname:
+                                logging.info(stackname + ": CREATE_IN_PROGRESS")
+                                creatingStacksSet.add(stackname)
+                        time.sleep(3)
+                    except Exception as e:
+                        raise e
+            return
+        except Exception as e:
+            raise e
+
+    def createStacks(self, add=False):
+        try:
+            print("#####################Preprocessing#####################")
+            self.__uploadTemplates()
+            print("#####################Create Stacks#####################")
+            print("ClusterName: " + CONFIG["clustername"])
+            self.__doCreateStacks(add)
+        except Exception as e:
+            raise e
+
+    def deleteStacks(self, noStdout=False):
+        def doDeleteStacks():
+            try:
+                # Delete stacks one by one.
+                print("Start to delete " + CONFIG["clustername"] + " cluster...")
+                deleteStackSeq = []
+                for stackName, template in CONFIG["templates"].items():
+                    deleteStackSeq.append(stackName)
+                for i in range(len(deleteStackSeq) - 1, -1, -1):
+                    try:
+                        stackName = deleteStackSeq[i]
+                        self.cfnclient.delete_stack(StackName=stackName)
+                        while True:
+                            try: 
+                                self.cfnclient.describe_stacks(StackName=stackName)
+                                time.sleep(4)
+                            except:
+                                break
+                    except:
+                        print("There is no stack to delete.")                            
+                print("Completed to delete " + CONFIG["clustername"] + " completed.")
+                return
+            except Exception as e:
+                raise e
+        # When directed "--delete" argument, "deleteStacks" function doesn't print any messages.
+        if noStdout is True:
+            with redirect_stdout(open(devnull, 'w')):
+                kill(getppid(), signal.SIGTERM)
+                doDeleteStacks()
+        else:
+            doDeleteStacks()
+
+class CustomArgparse(argparse.ArgumentParser):
+    def error(self, message):
+        message = "Argument is wrong...<(^^;)\n"
+        logging.error(message)
+        self.print_help()
+        sys.exit(2)
+
+if __name__ == "__main__":
+    try:
+        parser = argparse.ArgumentParser(
+            prog = "cfnclient",
+            description = "Automate to create and delete stacks.",
+            add_help = True
+    	)
+        parser.add_argument(
+            "-r",
+            "--recreate",
+            action = "store_true",
+            dest = "recreate",
+            help = "Delete all stacks then recreate stacks directed in CONFIG statement.",
+        )
+        parser.add_argument(
+            "-a",
+            "--add",
+            action = "store_true",
+            dest = "add",
+            help="Create stacks only do not exist. So if there is same stack name and that stack's state is CREATE_COMPLETE, skip it.",
+        )
+        parser.add_argument(
+            "-d",
+            "--delete",
+            action = "store_true",
+            dest = "delete",
+            help = "Delete all stacks directed in CONFIG statement.",
+        )
+        args = parser.parse_args()
+
+        # This one class corresponds to the cluster of creating stacks.
+        cfnauto = CfnAutomation()
+
+        if args.recreate:
+            cfnauto.createStacks()
+        elif args.add:
+            cfnauto.createStacks(add=True)
+        elif args.delete:
+            deleteStackProcess = Process(target=cfnauto.deleteStacks, args=(True,))
+            print("Start to delete stacks process.")
+            deleteStackProcess.start()
+            deleteStackProcess.join()
+        else:
+            parser.print_help()
+            sys.exit(2)
+    except SystemExit:
+        pass
+    except:
+        traceback.print_exc()
+        #logging.error(traceback.format_exc().splitlines()[-1])
+        exit(1)
